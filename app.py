@@ -1,77 +1,48 @@
-
-import numpy as np
-import torch
 import gradio as gr
-from transformers import AutoImageProcessor, AutoModelForObjectDetection
-from PIL import Image, ImageDraw
+from ultralytics import YOLO
+import cv2
+import numpy as np
+from traffic_logic import traffic_decision
 
+# Load YOLO model (use pretrained for demo, later replace with fine-tuned)
+model = YOLO("yolov8n.pt")
 
-# ---------------------------
-# Load pretrained YOLOS model
-# ---------------------------
-processor = AutoImageProcessor.from_pretrained("hustvl/yolos-tiny")
-model = AutoModelForObjectDetection.from_pretrained("hustvl/yolos-tiny")
+def analyze_traffic(image):
+    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    results = model(img)
+    detections = results[0].boxes.data.cpu().numpy()
 
-# Vehicle classes we care about
-vehicle_classes = ["car", "bus", "truck", "motorbike", "bicycle"]
-
-# ---------------------------
-# Detection function
-# ---------------------------
-def detect_vehicles(image):
-    frame = np.array(image.convert("RGB"))
-    inputs = processor(images=frame, return_tensors="pt")
-
-    outputs = model(**inputs)
-    target_sizes = torch.tensor([frame.shape[:2]])
-    results = processor.post_process_object_detection(
-        outputs, target_sizes=target_sizes, threshold=0.6
-    )[0]
-
-    draw = ImageDraw.Draw(image)
+    emergency_detected = False
     vehicle_count = 0
 
-    for score, label, box in zip(results["scores"], results["labels"], results["boxes"]):
-        class_name = model.config.id2label[label.item()]
-        if class_name in vehicle_classes:
+    for det in detections:
+        x1, y1, x2, y2, conf, cls = det
+        label = model.names[int(cls)]
+
+        if label in ["car", "bus", "truck", "motorbike"]:
             vehicle_count += 1
-            box = [int(i) for i in box.tolist()]
-            draw.rectangle(box, outline="green", width=3)
-            draw.text((box[0], box[1]-10), f"{class_name} {score:.2f}", fill="green")
+        if label in ["ambulance", "fire_truck", "police_car"]:  # needs fine-tuning
+            emergency_detected = True
 
-    # ---------------------------
-    # Traffic light decision
-    # ---------------------------
-    if vehicle_count > 10:
-        light = "GREEN (30s)"
-        light_color = "green"
-    elif vehicle_count > 0:
-        light = "GREEN (15s)"
-        light_color = "green"
-    else:
-        light = "RED"
-        light_color = "red"
+        cv2.rectangle(img, (int(x1), int(y1)), (int(x2), int(y2)), (0,255,0), 2)
+        cv2.putText(img, label, (int(x1), int(y1)-5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
 
-    # Draw simulated traffic light
-    r = 40
-    cx, cy = 60, 60
-    if light_color == "red":
-        draw.ellipse((cx-r, cy-r, cx+r, cy+r), fill="red")
-    elif light_color == "green":
-        draw.ellipse((cx-r, cy-r, cx+r, cy+r), fill="green")
+    decision = traffic_decision(vehicle_count, emergency_detected)
+    img_out = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-    return image, f"Vehicles detected: {vehicle_count} → Traffic Light: {light}"
+    return img_out, decision
 
-# ---------------------------
-# Gradio Interface
-# ---------------------------
-demo = gr.Interface(
-    fn=detect_vehicles,
-    inputs=gr.Image(type="pil"),
-    outputs=[gr.Image(type="pil"), gr.Textbox()],
-    title="🚦 AI-Assisted Traffic Light Control",
-    description="Upload a traffic image. YOLOS-tiny detects vehicles and decides signal timing."
+iface = gr.Interface(
+    fn=analyze_traffic,
+    inputs=gr.Image(type="pil", label="Upload Traffic Image"),
+    outputs=[
+        gr.Image(type="numpy", label="Detection Result"),
+        gr.Textbox(label="Traffic Light Decision")
+    ],
+    title="🚦 AI-Assisted Traffic Light Control System",
+    description="Upload a traffic image. AI detects vehicles and makes smart traffic light decisions (with emergency vehicle priority)."
 )
 
 if __name__ == "__main__":
-    demo.launch()
+    iface.launch()
